@@ -31,8 +31,19 @@ gen int t  = year - `baseyear' + 1
 gen double t2 = t^2
 
 sort year i j
-* Merge Step_23 baseline a_hat
-merge 1:1 year i j using "${INDIR}/Ahat_panel.csv", keepusing(a_hat) nogen
+
+* Merge Step_23 baseline a_hat (read CSV first for Stata version compatibility)
+tempfile base_ahat
+preserve
+    import delimited using "${INDIR}/Ahat_panel.csv", clear varnames(1) stringcols(_all)
+    destring year i j a_hat, replace force
+    keep year i j a_hat
+    drop if missing(year,i,j)
+    sort year i j
+    save `base_ahat', replace
+restore
+
+merge 1:1 year i j using `base_ahat', keepusing(a_hat) nogen
 
 * Robust estimate container
 gen double a_hat_2 = .
