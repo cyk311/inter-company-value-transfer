@@ -61,8 +61,10 @@ foreach p of local pairs_1 {
             continue
         }
 
-        quietly summarize a, meanonly
-        gen double x = a - r(mean)
+        * 先去趋势：用时间趋势项拟合后取残差用于谱分析
+        quietly regress a t t2
+        predict double a_trend, xb
+        gen double x = a - a_trend
         gen int tt = _n - 1
 
         local K = floor(`N'/2)
@@ -150,8 +152,10 @@ foreach p of local pairs_2 {
             continue
         }
 
-        quietly summarize a, meanonly
-        gen double x = a - r(mean)
+        * 先去趋势：用时间趋势项拟合后取残差用于谱分析
+        quietly regress a t t2
+        predict double a_trend, xb
+        gen double x = a - a_trend
         gen int tt = _n - 1
 
         local K = floor(`N'/2)
