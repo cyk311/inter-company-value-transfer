@@ -1,9 +1,12 @@
 *******************************************************
-* Robust_2 (Stata, NO MATA)
+* Robust_3 (Stata, NO MATA)
 * 任务：
-* 1) 将时间拆分为 1981-1999 与 2000-2018，两段分别按 Step_23.do 方法估计 a_hat_2
-* 2) 比较 a_hat_2 与 Step_23.do 的 a_hat 是否存在统计差异
-* 3) 输出 year, a, a_hat, a_hat_2 到同一张 xlsx
+* 1) 将时间分为 1981-1999 与 2000-2018 两段，分别按 DFT 提取周期
+* 2) 使用同一回归方程：a = b0 + b1*t + b2*t2 + b3*cos + b4*sin
+* 3) 每段都先在子样本区间估计，再对完整 1981-2018 生成预测值
+* 4) 1981-1999 训练得到的完整期预测记作 ahat_1st_half
+*    2000-2018 训练得到的完整期预测记作 ahat_2nd_half
+* 5) 输出字段：year i j a ahat ahat_1st_half ahat_2nd_half
 *******************************************************
 version 15
 clear all
@@ -26,15 +29,25 @@ drop if missing(year,i,j)
 gen int pair = i*100 + j
 sort pair year
 
-gen int t  = year - `baseyear' + 1
+gen int t = year - `baseyear' + 1
 gen double t2 = t^2
 
-* Robust estimate container
-gen double a_hat_2 = .
-gen double c_ij_2  = .
+* Baseline ahat from Step_23 is assumed to be a_hat
+capture confirm variable a_hat
+if _rc {
+    di as err "Variable a_hat not found in Ahat_panel.csv."
+    exit 111
+}
+
+gen double ahat_1st_half = .
+gen double ahat_2nd_half = .
+
+* Segment-specific period containers
+gen double c_1 = .
+gen double c_2 = .
 
 *======================================================
-* 分段估计：1981-1999
+* Segment 1: Train on 1981-1999
 *======================================================
 local ystart = 1981
 local yend   = 1999
@@ -96,34 +109,32 @@ foreach p of local pairs_1 {
         local c = `N'/`bestk'
     restore
 
-    replace c_ij_2 = `c' if pair==`p' & inrange(year,`ystart',`yend')
+    replace c_1 = `c' if pair==`p'
 
     if mod(`iter',50)==0 di as txt "Segment 1 DFT progress: `iter' / `npairs_1'"
 }
 
-replace c_ij_2 = 2 if inrange(year,`ystart',`yend') & (missing(c_ij_2) | c_ij_2<2)
-
-gen double cosTerm2 = .
-gen double sinTerm2 = .
-replace cosTerm2 = cos(2*c(pi)*t/c_ij_2) if inrange(year,`ystart',`yend')
-replace sinTerm2 = sin(2*c(pi)*t/c_ij_2) if inrange(year,`ystart',`yend')
+replace c_1 = 2 if missing(c_1) | c_1 < 2
+gen double cos_1 = cos(2*c(pi)*t/c_1)
+gen double sin_1 = sin(2*c(pi)*t/c_1)
 
 local iter = 0
 foreach p of local pairs_1 {
     local ++iter
-    capture noisily regress a t t2 cosTerm2 sinTerm2 if pair==`p' & inrange(year,`ystart',`yend')
+
+    capture noisily regress a cos_1 sin_1 if pair==`p' & inrange(year,`ystart',`yend')
     if _rc continue
 
-    tempvar y1
-    predict double `y1' if e(sample), xb
-    replace a_hat_2 = `y1' if pair==`p' & inrange(year,`ystart',`yend') & e(sample)
-    drop `y1'
+    tempvar yhat1
+    predict double `yhat1' if pair==`p', xb
+    replace ahat_1st_half = `yhat1' if pair==`p' & inrange(year,1981,2018)
+    drop `yhat1'
 
     if mod(`iter',50)==0 di as txt "Segment 1 Est progress: `iter' / `npairs_1'"
 }
 
 *======================================================
-* 分段估计：2000-2018
+* Segment 2: Train on 2000-2018
 *======================================================
 local ystart = 2000
 local yend   = 2018
@@ -185,34 +196,45 @@ foreach p of local pairs_2 {
         local c = `N'/`bestk'
     restore
 
-    replace c_ij_2 = `c' if pair==`p' & inrange(year,`ystart',`yend')
+    replace c_2 = `c' if pair==`p'
 
     if mod(`iter',50)==0 di as txt "Segment 2 DFT progress: `iter' / `npairs_2'"
 }
 
-replace c_ij_2 = 2 if inrange(year,`ystart',`yend') & (missing(c_ij_2) | c_ij_2<2)
-
-replace cosTerm2 = cos(2*c(pi)*t/c_ij_2) if inrange(year,`ystart',`yend')
-replace sinTerm2 = sin(2*c(pi)*t/c_ij_2) if inrange(year,`ystart',`yend')
+replace c_2 = 2 if missing(c_2) | c_2 < 2
+gen double cos_2 = cos(2*c(pi)*t/c_2)
+gen double sin_2 = sin(2*c(pi)*t/c_2)
 
 local iter = 0
 foreach p of local pairs_2 {
     local ++iter
-    capture noisily regress a t t2 cosTerm2 sinTerm2 if pair==`p' & inrange(year,`ystart',`yend')
+
+    capture noisily regress a cos_2 sin_2 if pair==`p' & inrange(year,`ystart',`yend')
     if _rc continue
 
-    tempvar y2
-    predict double `y2' if e(sample), xb
-    replace a_hat_2 = `y2' if pair==`p' & inrange(year,`ystart',`yend') & e(sample)
-    drop `y2'
+    tempvar yhat2
+    predict double `yhat2' if pair==`p', xb
+    replace ahat_2nd_half = `yhat2' if pair==`p' & inrange(year,1981,2018)
+    drop `yhat2'
 
     if mod(`iter',50)==0 di as txt "Segment 2 Est progress: `iter' / `npairs_2'"
 }
 
 *------------------------
-* 统计检验：a_hat_2 vs a_hat
+* Hybrid
 *------------------------
-gen double diff_hat = a_hat_2 - a_hat if !missing(a_hat_2,a_hat)
+
+gen     ahat_hybrid = .
+replace ahat_hybrid = ahat_1st_half if year >= 2000
+replace ahat_hybrid = ahat_2nd_half if year <  2000
+
+ttest 	 a_hat == ahat_hybrid
+signrank a_hat =  ahat_hybrid
+
+*------------------------
+* 统计检验：ahat_hybrid vs a_hat
+*------------------------
+gen double diff_hat = ahat_hybrid - a_hat if !missing(ahat_hybrid,a_hat)
 
 quietly count if !missing(diff_hat)
 local Ndiff = r(N)
@@ -239,29 +261,36 @@ if !_rc {
 }
 
 *------------------------
-* 导出 Excel
+* Export
 *------------------------
+	
 preserve
-    keep year i j a a_hat a_hat_2
+    keep year i j a a_hat ahat_1st_half ahat_2nd_half ahat_hybrid
+    rename a_hat ahat
     sort year i j
 
-    gen str20 a_s      = string(a, "%20.15f")
-    gen str20 a_hat_s  = string(a_hat, "%20.15f")
-    gen str20 a_hat2_s = string(a_hat_2, "%20.15f")
+    gen str20 a_s          = string(a, "%20.15f")
+    gen str20 ahat_s       = string(ahat, "%20.15f")
+    gen str20 ahat1_s      = string(ahat_1st_half, "%20.15f")
+    gen str20 ahat2_s      = string(ahat_2nd_half, "%20.15f")
+	gen str20 ahath_s	   = string(ahat_hybrid, "%20.15f")
+	
+    keep year i j a_s ahat_s ahat1_s ahat2_s ahath_s
+    rename a_s a
+    rename ahat_s ahat
+    rename ahat1_s ahat_1st_half
+    rename ahat2_s ahat_2nd_half
+	rename ahath_s ahat_hybrid
 
-    keep year i j a_s a_hat_s a_hat2_s
-	rename a_s a
-	rename a_hat_s a_hat
-	rename a_hat2_s a_hat_2
-    export excel using "${OUTDIR}/Robust_2_compare.xlsx", ///
+    export excel using "${OUTDIR}/Robust_3_compare.xlsx", ///
         sheet("data") firstrow(variables) replace
 restore
 
-putexcel set "${OUTDIR}/Robust_2_compare.xlsx", sheet("tests") modify
+putexcel set "${OUTDIR}/Robust_3_compare.xlsx", sheet("tests") modify
 putexcel A1 = "test" B1 = "stat" C1 = "p_value" D1 = "N" E1 = "mean_diff" F1 = "sd_diff"
-putexcel A2 = "paired_ttest(a_hat_2-a_hat=0)" B2 = (`tstat') C2 = (`tpval') D2 = (`Ndiff') E2 = (`mdiff') F2 = (`sddiff')
-putexcel A3 = "signrank(a_hat_2-a_hat=0)" B3 = (`sr_z') C3 = (`sr_p') D3 = (`Ndiff')
+putexcel A2 = "paired_ttest" B2 = (`tstat') C2 = (`tpval') D2 = (`Ndiff') E2 = (`mdiff') F2 = (`sddiff')
+putexcel A3 = "signrank" B3 = (`sr_z') C3 = (`sr_p') D3 = (`Ndiff')
 
 di as txt "Done. Output written to:"
-di as txt "  ${OUTDIR}/Robust_2_compare.xlsx"
+di as txt "  ${OUTDIR}/Robust_3_compare.xlsx"
 *******************************************************
