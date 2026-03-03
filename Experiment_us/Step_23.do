@@ -7,7 +7,7 @@
 *
 * 关键优化：
 *   - 用 Mata + panelsetup 一次性按 pair 分块处理（避免 preserve/restore 大循环）
-*   - 用 FFT 代替逐频率显式求和，显著降低 DFT 计算量
+*   - 用 Mata 向量化DFT替代Stata双重循环，兼顾速度与兼容性
 *******************************************************
 version 15
 clear all
@@ -49,18 +49,17 @@ real scalar has_missing(real colvector x)
     return(sum(x :== .) > 0)
 }
 
-void step23_us_fft_fast()
+void step23_us_fast()
 {
     real colvector pair, a, t, t2
     real matrix P
-    real scalar g, G, s, e, N, K, idx
-    real scalar c, bestk, bestmag
+    real scalar g, G, s, e, N, K, k
+    real scalar c, bestk, bestmag, mag
 
     real matrix X, Z
-    real colvector y, trend, x, yh, resid2, mag
+    real colvector y, trend, x, yh, resid2, ang, re, im
     real colvector c_out, yhat_out, model_out, sse_out
 
-    complex colvector F
 
     pair = st_data(., "pair")
     a    = st_data(., "a")
@@ -88,24 +87,22 @@ void step23_us_fft_fast()
             trend = X * qrsolve(X, y)
             x = y - trend
 
-            * FFT: F[1] 为零频; 频率 k 对应 F[k+1]
-            F = fft(complex(x, J(N,1,0)))
+            // 向量化DFT：对 k=1..floor(N/2) 计算幅值
             K = floor(N/2)
+            bestk = 1
+            bestmag = -1
 
             if (K >= 1) {
-                mag = abs(F[|2\(K+1)|])
-                bestk = 1
-                bestmag = mag[1]
-                for (idx = 2; idx <= rows(mag); idx++) {
-                    if (mag[idx] > bestmag) {
-                        bestmag = mag[idx]
-                        bestk = idx
+                for (k = 1; k <= K; k++) {
+                    ang = 2*pi()*k*(0::(N-1))/N
+                    re = x :* cos(ang)
+                    im = x :* sin(ang)
+                    mag = sqrt((sum(re))^2 + (sum(im))^2)
+                    if (mag > bestmag) {
+                        bestmag = mag
+                        bestk = k
                     }
                 }
-                if (rows(mag)==1) bestk = 1
-            }
-            else {
-                bestk = 1
             }
 
             c = N / bestk
@@ -137,7 +134,7 @@ void step23_us_fft_fast()
     printf("Total pairs processed: %9.0f\n", G)
 }
 
-step23_us_fft_fast()
+step23_us_fast()
 end
 
 replace c_ij = 2 if missing(c_ij) | c_ij<2
