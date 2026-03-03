@@ -1,9 +1,13 @@
 *******************************************************
-* 美国稳健性检验 Step_23 (与 Experiment_3/Step_23.do 同写法)
-*   - 第二部分：为每个(i,j)对应的技术时间序列做DFT，计算主周期c_ij
-*   - 第三部分：带入指定线性回归模型 + 导出 Ahat_panel.csv
+* 美国稳健性检验 Step_23 (高性能优化版)
+* 参考 Experiment_3/Step_23.do 的模型：
+*   1) 每个(i,j)序列去趋势后做DFT，得到主周期 c_ij
+*   2) 回归: a_ij = alpha + beta1*t + beta2*t^2 + beta3*cos(2*pi*t/c_ij) + beta4*sin(2*pi*t/c_ij) + mu_t
+* 数据结构: year; i; j; a_ij
 *
-* 数据结构：year; i; j; a_ij
+* 关键优化：
+*   - 用 Mata + panelsetup 一次性按 pair 分块处理（避免 preserve/restore 大循环）
+*   - 用 FFT 代替逐频率显式求和，显著降低 DFT 计算量
 *******************************************************
 version 15
 clear all
@@ -25,148 +29,132 @@ destring year i j a_ij, replace force
 drop if missing(year,i,j)
 rename a_ij a
 
-* 用 group(i j) 避免 i*100+j 的潜在冲突
+* 稳健 pair id + 排序
 egen long pair = group(i j)
 sort pair year
 
-* time index t = 1..T
+* time index
 gen int t  = year - `baseyear' + 1
 gen double t2 = t^2
 
-*------------------------
-* 第二部分: 为每个(i,j)对应的技术时间序列做DFT，计算主周期c_ij (NO FFT, NO MATA)
-* 对去趋势值做DFT： x_t = a_t - a_trend_t
-* For k=1..floor(N/2): magnitude = sqrt(Re^2 + Im^2)
-*   实部：Re = sum_t x_t cos(2*pi*k*t/N), 虚部：Im = -sum_t x_t sin(2*pi*k*t/N)
-* Choose k* with max magnitude; c = N/k*
-*------------------------
-gen double c_ij = .
+* 结果变量
+gen double c_ij  = .
+gen double a_hat = .
+gen byte   model = .
+gen double SSE1  = .
 
-levelsof pair, local(pairs)
-local npairs : word count `pairs'
-di as txt "DFT: total pairs = `npairs'"
+mata:
+real scalar has_missing(real colvector x)
+{
+    return(sum(x :== .) > 0)
+}
 
-local iter = 0
-foreach p of local pairs {
-    local ++iter
+void step23_us_fft_fast()
+{
+    real colvector pair, a, t, t2
+    real matrix P
+    real scalar g, G, s, e, N, K, idx
+    real scalar c, bestk, bestmag
 
-    preserve
-        keep if pair==`p'
-        sort year
+    real matrix X, Z
+    real colvector y, trend, x, yh, resid2, mag
+    real colvector c_out, yhat_out, model_out, sse_out
 
-        count
-        local N = r(N)
-        quietly count if missing(a)
-        local Nm = r(N)
+    complex colvector F
 
-        if (`N' < 10 | `Nm' > 0) {
-            restore
-            continue
-        }
+    pair = st_data(., "pair")
+    a    = st_data(., "a")
+    t    = st_data(., "t")
+    t2   = st_data(., "t2")
 
-        * 先去趋势：用时间趋势项拟合后取残差用于谱分析
-        quietly regress a t t2
-        predict double a_trend, xb
-        gen double x = a - a_trend
-        gen int tt = _n - 1
+    P = panelsetup(pair, 1)
+    G = rows(P)
 
-        local K = floor(`N'/2)
-        local bestmag = -1
-        local bestk   = 1
+    c_out     = J(rows(pair), 1, 2)
+    yhat_out  = J(rows(pair), 1, .)
+    model_out = J(rows(pair), 1, .)
+    sse_out   = J(rows(pair), 1, .)
 
-        forvalues k = 1/`K' {
-            gen double ang = 2*c(pi)*`k'*tt/`N'
-            gen double cs  = cos(ang)
-            gen double sn  = sin(ang)
 
-            gen double xcs = x*cs
-            gen double xsn = x*sn
+    for (g = 1; g <= G; g++) {
+        s = P[g,1]
+        e = P[g,2]
+        N = e - s + 1
 
-            egen double Re = total(xcs)
-            egen double Im = total(-xsn)
+        y = a[|s\e|]
 
-            quietly summarize Re in 1, meanonly
-            local ReS = r(mean)
-            quietly summarize Im in 1, meanonly
-            local ImS = r(mean)
+        if (N >= 10 & !has_missing(y)) {
+            X = J(N,1,1), t[|s\e|], t2[|s\e|]
+            trend = X * qrsolve(X, y)
+            x = y - trend
 
-            local mag = sqrt((`ReS')^2 + (`ImS')^2)
-            if (`mag' > `bestmag') {
-                local bestmag = `mag'
-                local bestk   = `k'
+            * FFT: F[1] 为零频; 频率 k 对应 F[k+1]
+            F = fft(complex(x, J(N,1,0)))
+            K = floor(N/2)
+
+            if (K >= 1) {
+                mag = abs(F[|2\(K+1)|])
+                bestk = 1
+                bestmag = mag[1]
+                for (idx = 2; idx <= rows(mag); idx++) {
+                    if (mag[idx] > bestmag) {
+                        bestmag = mag[idx]
+                        bestk = idx
+                    }
+                }
+                if (rows(mag)==1) bestk = 1
+            }
+            else {
+                bestk = 1
             }
 
-            drop ang cs sn xcs xsn Re Im
+            c = N / bestk
+            if (c < 2 | c == .) c = 2
+            c_out[|s\e|] = J(N,1,c)
+
+            Z = J(N,1,1), t[|s\e|], t2[|s\e|], cos(2*pi()*t[|s\e|]/c), sin(2*pi()*t[|s\e|]/c)
+            yh = Z * qrsolve(Z, y)
+            yhat_out[|s\e|]  = yh
+            model_out[|s\e|] = J(N,1,1)
+
+            resid2 = (y - yh):^2
+            sse_out[|s\e|] = J(N,1,sum(resid2))
+        }
+        else {
+            c_out[|s\e|] = J(N,1,2)
         }
 
-        local c = `N'/`bestk'
-    restore
+        if (mod(g, 1000)==0) {
+            printf("Processed pairs: %9.0f\n", g)
+        }
+    }
 
-    replace c_ij = `c' if pair==`p'
+    st_store(., "c_ij",  c_out)
+    st_store(., "a_hat", yhat_out)
+    st_store(., "model", model_out)
+    st_store(., "SSE1",  sse_out)
 
-    if mod(`iter',50)==0 di as txt "DFT progress: `iter' / `npairs'"
+    printf("Total pairs processed: %9.0f\n", G)
 }
+
+step23_us_fft_fast()
+end
 
 replace c_ij = 2 if missing(c_ij) | c_ij<2
-
-* trig terms for Step 3
-gen double cosTerm = cos(2*c(pi)*t/c_ij)
-gen double sinTerm = sin(2*c(pi)*t/c_ij)
-
-*------------------------
-* 第三部分: 线性回归（模型一）
-* a_{ij} = alpha + beta_1*t + beta_2*t^2 + beta_3*sin(2*pi*t/c_ij) + beta_4*cos(2*pi*t/c_ij) + mu_t
-*------------------------
-gen double a_hat  = .
-gen byte   model  = .
-
-tempfile pairstats
-postfile STATS long pair double i double j double c_ij byte model ///
-    double SSE1 ///
-    using `pairstats', replace
-
-di as txt "Estimation stage..."
-
-local iter = 0
-foreach p of local pairs {
-    local ++iter
-
-    capture noisily regress a t t2 cosTerm sinTerm if pair==`p'
-    if _rc continue
-
-    tempvar y1 r1
-    predict double `y1' if e(sample), xb
-    gen double `r1' = (a-`y1')^2 if pair==`p' & e(sample)
-    quietly summarize `r1' if pair==`p' & e(sample), meanonly
-    local SSE1 = r(sum)
-    replace a_hat = `y1' if pair==`p' & e(sample)
-    drop `y1' `r1'
-
-    replace model = 1 if pair==`p' & e(sample)
-
-    quietly summarize i if pair==`p', meanonly
-    local ii = r(mean)
-    quietly summarize j if pair==`p', meanonly
-    local jj = r(mean)
-    quietly summarize c_ij if pair==`p', meanonly
-    local cc = r(mean)
-
-    post STATS (`p') (`ii') (`jj') (`cc') (1) (`SSE1')
-
-    if mod(`iter',50)==0 di as txt "Est progress: `iter' / `npairs'"
-}
-
-postclose STATS
 
 *------------------------
 * Export
 *------------------------
+preserve
+    keep if model==1
+    collapse (first) i j c_ij model SSE1, by(pair)
+    order pair i j c_ij model SSE1
+    export delimited using "${OUTDIR}/pair_diagnostics.csv", replace
+restore
+
 keep year i j a a_hat c_ij model
 order year i j a a_hat c_ij model
 export delimited using "${OUTDIR}/Ahat_panel.csv", replace
-
-use `pairstats', clear
-export delimited using "${OUTDIR}/pair_diagnostics.csv", replace
 
 di as txt "Done. Outputs written to:"
 di as txt "  ${OUTDIR}/Ahat_panel.csv"
