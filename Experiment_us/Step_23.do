@@ -56,18 +56,23 @@ real scalar has_missing(real colvector x) {
 
 void step23_us_fast()
 {
-    real colvector pair = st_data(., "pair")
-    real colvector a    = st_data(., "a")
-    real colvector t    = st_data(., "t")
-    real colvector t2   = st_data(., "t2")
+    real colvector pair
+    real colvector a
+    real colvector t
+    real colvector t2
 
     real scalar Nall
     real scalar s, e, N, K, k, bestk, n_pairs
     real scalar c, mag, bestmag
 
     real matrix X, Z
-    real colvector y, trend, x, yh, re, im, SSE
+    real colvector y, trend, x, yh, re, im, ang
     real colvector c_out, yhat_out, model_out
+
+    pair = st_data(., "pair")
+    a    = st_data(., "a")
+    t    = st_data(., "t")
+    t2   = st_data(., "t2")
 
     Nall = rows(pair)
     c_out    = J(Nall, 1, 2)
@@ -94,7 +99,6 @@ void step23_us_fast()
             bestmag = -1
 
             for (k = 1; k <= K; k++) {
-                real colvector ang
                 ang = 2*pi()*k*(0::(N-1))/N
                 re = x :* cos(ang)
                 im = x :* sin(ang)
